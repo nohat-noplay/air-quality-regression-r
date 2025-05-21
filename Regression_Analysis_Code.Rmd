@@ -1,0 +1,1901 @@
+---
+title: "Regression_Climate"
+author: "Saf Flatters"
+date: "2024"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+# This chunk just sets up some defaults
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	comment = NA,
+	prompt = FALSE,
+	tidy = TRUE
+)
+```
+
+# An Investigation into the Association between Pollution and Human Ecology and Climate
+
+Saf Flatters 2024
+
+```{r}
+#install.packages("ggplot2")
+# install and load packages
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(tibble)
+library(patchwork) #plot side by side
+library(PerformanceAnalytics) 
+library(car)
+library(corrplot)
+library(leaps)
+library(tinytex)
+
+```
+
+## Functions
+
+```{r}
+
+#####CORRELATIONS
+
+#No need to use standardised variables
+#Function to perform Spearman Correlation Hypothesis test (called by spearman_corrFunction)
+spearman_testFunction <- function(xvar, alternative) {
+  #suppress warnings for ties
+  spearmantest_result <- suppressWarnings(
+    cor.test(PollutionData[[xvar]], PollutionData$SO2, method = "spearman", alternative = alternative)
+    )
+ #extract to print p value
+  p_value <- spearmantest_result$p.value
+  #test_statistic <- spearmantest_result$statistic
+  #print the result of the hypothesis test
+  cat("Spearman Hypothesis test of", xvar, "and SO2: where H_1 is", alternative, "\n",
+      "P-value:", p_value, "\n\n")
+}
+#Function to perform Spearman Correlation Coefficient and call for hyp test function
+spearman_corrFunction <- function(xvar) {
+  spearmancorr_result <- cor(PollutionData[[xvar]], PollutionData$SO2, method = "spearman")
+  #print correlation number
+  cat("Spearman Correlation of", xvar, "and SO2: ", spearmancorr_result, "\n")
+  #call hypothesis test depending if alternative should be greater or less
+  if (spearmancorr_result > 0) {
+    spearman_testFunction(xvar, "greater")
+  } else { 
+    spearman_testFunction(xvar, "less")
+  }
+}
+
+#### SLR LINE OF BEST FIT
+
+#functions to fit line, print summary and plot
+fitline_function <- function(xvar, data) {
+  # Dynamic formula for lm
+  formula <- as.formula(paste("SO2 ~", xvar))
+  # Fit the linear model
+  lm_model <- lm(formula, data = data)
+  return(lm_model)
+} 
+lmsummary_function <- function(xvar, lm_model) {
+  return(summary(lm_model))
+}
+lmplot_function <- function(xvar, colour, data) {
+  
+  plot_lm <- plot(ggplot(data, aes_string(x = xvar, y = "SO2")) +
+    geom_point(color = colour) +
+    geom_smooth(method = "lm", color = "blue", se = FALSE) +
+    theme_minimal() 
+  )
+  return(plot_lm)
+}
+
+
+### CHECK RESIDUALS 
+
+# Function to create a Q-Q plot using ggplot
+ggplot_qq <- function(residuals, title, color) {
+  ggplot(data.frame(sample = residuals), aes(sample = sample)) +
+    stat_qq(color = color) +
+    stat_qq_line(color = "black", linetype = "dashed") +
+    labs(title = title) +
+    theme_minimal()
+}
+# Function to create a ggplot histogram with a normal curve 
+ggplot_hist_with_normal <- function(residuals, title, xlab, fill_color) {
+  # Create a data frame for ggplot to use
+  residuals_df <- data.frame(residuals = residuals)
+  ggplot(residuals_df, aes(x = residuals)) +
+    geom_histogram(aes(y = ..density..), bins = 20, fill = fill_color, color = "black", alpha = 0.7) +
+    stat_function(fun = dnorm, 
+                  args = list(mean = mean(residuals, na.rm = TRUE), 
+                              sd = sd(residuals, na.rm = TRUE)), 
+                  color = "red", size = 1) +
+    labs(title = title, x = xlab, y = "Density") +
+    theme_minimal()
+}
+
+### CHECKING TRANSFORMATIONS
+
+#FIT LM MODEL
+make_linear_model_function <- function(data, xvar, yvar) {
+  formula <- as.formula(paste(yvar,"~", xvar))
+  linear_model <- lm(formula, data = data) 
+  return(linear_model)
+}
+#Standardise Residuals
+standard_residuals_function <- function(data, xvar, yvar) {
+  lmodel <- make_linear_model_function(data, xvar, yvar)
+  std.residuals <- rstandard(lmodel)
+  return(std.residuals)
+}
+#Scatterplot residuals to check homdcesdacity and linearity
+residual_plot_function <- function(data, xvar, yvar, title, colour) {  
+  yy <- standard_residuals_function(data, xvar, yvar)
+  lmplot <- ggplot(data, aes_string(x = xvar, y = "yy")) +
+  geom_point(color = colour) +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = xvar, y = "Standardised Residuals", 
+       title = title) +
+  theme_minimal()  
+}
+
+
+####LEVERAGE
+
+#Hat Values
+plot_hat_values <- function(data, x_var, y_var, false_color = "darkorange") {   
+  # Fit the linear model using the specified x variable   
+  model_formula <- as.formula(paste(y_var, "~", x_var))   
+  model <- lm(model_formula, data = data)    
+  # Calculate the hat values   
+  hat_values <- hatvalues(model)   
+  #Calculate p
+  p <- length(coef(model)) - 1
+    #Calculate n
+  n <- nrow(data)
+  # Combine hat values with the original data   
+  data <- data %>%     
+    mutate(HatValues = hat_values,            
+           HighLeverage = HatValues > (2*(p + 1) / n())) %>%
+    mutate(ID = row_number())
+  # Create the plot   
+  ggplot(data, aes_string(x = x_var, y = "HatValues")) +     
+    geom_point(aes(color = HighLeverage),                 
+               alpha = 0.9,                 
+               size = 3,
+               show.legend = FALSE) +  
+    scale_color_manual(values = c("FALSE" = false_color, "TRUE" = "green"), name = "High Leverage") +  # Custom colors for high leverage     
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +   # Horizontal line at y = 0     
+    labs(x = x_var, y = "Hat Matrix", 
+     title = paste("Hat Matrix:", x_var)) +     
+    theme_minimal() +   
+    # Add labels for high leverage points     
+    geom_text(data = filter(data, HighLeverage),                
+              aes(label = ID),               
+              vjust = -0.5,                
+              color = "black",                
+              size = 3)  # Adjust size as needed 
+}
+#Cooks Distance
+plot_cooks_distance <- function(data, x_var, y_var, false_color = "darkorange") {   
+  # Fit the linear model using the specified x variable   
+  model_formula <- as.formula(paste(y_var,"~", x_var))   
+  model <- lm(model_formula, data = data)    
+  # Calculate Cook's distance   
+  cooks_distance <- cooks.distance(model)  
+    #Calculate p
+  p <- length(coef(model)) - 1
+      #Calculate n
+  n <- nrow(data)
+  # Combine Cook's distance with the original data   
+  data <- data %>%     
+    mutate(CooksDistance = cooks_distance,            
+           HighInfluence = CooksDistance > (2*(p + 1) / (n() - (p -2)))) %>%
+    mutate(ID = row_number())  
+  # Create the plot   
+  ggplot(data, aes_string(x = x_var, y = "CooksDistance")) +     
+    geom_point(aes(color = HighInfluence),                 
+               alpha = 0.9,                 
+               size = 3) +  
+    scale_color_manual(values = c("FALSE" = false_color, "TRUE" = "green"), name = "High Leverage") +   # Custom colors for high influence   
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +   # Horizontal line at y = 0     
+    labs(x = x_var, y = "Cook's Distance",           
+         title = paste("Cook's Dist.:", x_var)) +     
+    theme_minimal() + 
+    # Add labels for high influence points     
+    geom_text(data = filter(data, HighInfluence),                
+              aes(label = ID),               
+              vjust = -0.5,                
+              color = "black",                
+              size = 3)  # Adjust size as needed 
+}  
+
+### COMPARE SLR MODELS 
+
+compare_lm_function <- function(data, x_var, y_var, row_to_remove, colour) {
+  # Step 1: Fit the initial linear model
+  model_formula <- as.formula(paste(y_var, "~", x_var))
+  initial_model <- lm(model_formula, data = data)
+  # Step 2: Remove the specified row
+  data_no_outlier <- data[-row_to_remove, ]
+  # Step 3: Fit the linear model after removing the row
+  model_no_outlier <- lm(model_formula, data = data_no_outlier)
+  # Step 4: Plot both linear models
+  plot <- ggplot(data, aes_string(x = x_var, y = y_var)) +
+    geom_point(color = colour) +
+    geom_abline(intercept = coef(initial_model)[1], 
+                slope = coef(initial_model)[2], 
+                color = "blue") +
+    geom_abline(intercept = coef(model_no_outlier)[1], 
+                slope = coef(model_no_outlier)[2], 
+                color = "red") +
+    theme_minimal() +
+    labs(title = "Comparison of Linear Models Before (blue) and After Outlier Removal (red)",
+         x = x_var,
+         y = y_var)
+  print(plot)
+  # Step 5: Calculate ANOVA and print results
+  anova_initial <- anova(initial_model)
+  anova_no_outlier <- anova(model_no_outlier)
+  mse_initial <- anova_initial["Residuals", "Mean Sq"]
+  mse_no_outlier <- anova_no_outlier["Residuals", "Mean Sq"]
+  cat("\n##### Compare ANOVA Tables for", x_var, "Outlier: ID", row_to_remove)
+  cat("\nPre-Outlier-Removal:")
+  cat("\nMSE:", mse_initial)
+  cat("\nPost-Outlier-Removal:")
+  cat("\nMSE:", mse_no_outlier)
+  # Step 6: Determine which model fits better
+  if (mse_no_outlier < mse_initial) {
+    cat("\n\nModel after Outlier Removal fits better (due to lower MSE = higher F = lower pvalue).\n")
+  } else {
+    cat("\n\nModel before Outlier Removal fits better (due to lower MSE = higher F = lower pvalue).\n")
+  }
+}
+
+```
+
+```         
+```
+
+## A1. Introduction {#sec-1.-introduction}
+
+### A1.1 Setting up
+
+```{r}
+
+PollutionDf <- read.csv("Pollution.csv")
+
+#Make Dataframe show numerical variables in alphabetical order so plots all match
+alphorder <- c("SO2", "manu", "popul", "precip", "predays", "temp", "wind", "region")
+PollutionData <- PollutionDf[alphorder]
+
+PollutionData <- PollutionData %>%   
+  mutate(ID = row_number())
+
+# View(PollutionData)
+head(PollutionData)
+
+n <- nrow(PollutionData) #number of observations
+```
+
+## A2. Exploratory Analysis
+
+### A2.1 Structure of Data
+
+```{r}
+
+str(PollutionData)
+```
+
+### A2.2 Variables
+
+### A2.3 Standardised Numerical Variables
+
+```{r}
+#Standardise Numerical Exp Data so it can be visually checked on same plots
+PD_std <- PollutionData %>%
+  transmute(
+    SO2 = SO2,
+    temp_std = scale(temp)[,1],
+    manu_std = scale(manu)[,1],
+    popul_std = scale(popul)[,1],
+    wind_std = scale(wind)[,1],
+    precip_std = scale(precip)[,1],
+    predays_std = scale(predays)[,1],
+    region = region,
+    
+    )
+# View(PD_std)
+
+```
+
+### A2.4 Summary Statistics
+
+```{r}
+summary(PollutionData)
+```
+
+#### A2.4.1 Plotted Summary Statistics on Numerical Variables
+
+```{r cache = FALSE}
+# Reshape data for boxplot
+long_data <- PD_std %>%
+  pivot_longer(
+    cols = !c(SO2, region),  # Exclude columns SO2 and region
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+# Create side-by-side boxplots
+ggplot(long_data, aes(x = Variable, y = Value, fill = Variable)) +
+  geom_boxplot() +  
+  theme_minimal() +
+  labs(title = "Boxplots of Standardised Numerical Explanatory Variables", y = "Standard Deviations") +
+  scale_fill_manual(values = c('darkorange', 'darkolivegreen','darkslategray3','deeppink1','tomato', 'darkorchid'))
+```
+
+#### A2.4.2 Normality check by Shapiro-Wilk Test
+
+```{r}
+# hypothesis testing for normality, Ho: data are Normal 
+
+shapiro.test(PD_std$manu_std)
+shapiro.test(PD_std$popul_std)
+shapiro.test(PD_std$precip_std)
+shapiro.test(PD_std$predays_std)
+shapiro.test(PD_std$temp_std)
+shapiro.test(PD_std$wind_std)
+
+```
+
+#### A2.4.3 Frequency Counts on Categorical Variable
+
+```{r}
+table(PollutionData$region)
+
+
+ggplot(data = PollutionData, mapping = aes(x = region)) +
+  theme_minimal() +
+  labs(title = "Counts of Cities in Each Region") +
+  geom_bar(color = "black", fill="darkkhaki")
+```
+
+#### A2.4.4 Explore Response Variable
+
+```{r}
+SO2box <- ggplot(PD_std, aes(y = SO2)) +
+  geom_boxplot(fill = 'grey') +  
+  theme_minimal() +
+  labs(title = "Boxplots of SO2", y = "Standard Deviations")
+
+SO2hist <- ggplot(PollutionData, aes(x = SO2)) + 
+  geom_histogram(fill = "grey", color="black", bins=20) + 
+  theme_minimal() +
+  labs(title = "Count of SO2", 
+       x = "SO2", 
+       y = "Count")
+
+SO2box + SO2hist
+```
+
+### A2.5 Scatterplots of Numerical Variables
+
+```{r}
+# Reshape the data from wide to long format
+long_data2 <- PollutionData %>%
+  pivot_longer(cols = c(temp, manu, popul, wind, precip, predays),
+               names_to = "Variables",
+               values_to = "Value2")
+
+# Create scatterplots with facet_wrap to see all variables in same plot
+ggplot(data = long_data2, aes(x = Value2, y = SO2, color = Variables)) +
+  geom_point() +
+  theme_minimal() +
+  facet_wrap(~ Variables, scales = "free_x")  +
+  labs(title = "Scatterplots of Numerical Explanatory Variables with S02", x = "Values", y = "Average annual SO2 concentration in air (micro-g/m^3) ") + 
+  scale_color_manual(values = c('darkorange', 'darkolivegreen','darkslategray3','deeppink1','tomato', 'darkorchid'))
+
+
+```
+
+### A2.5 Correlation of Numerical Variables
+
+#### A2.5.1 Pearson Correlation Coefficient
+
+```{r}
+#Standardise response variable
+SO2_std <- scale(PD_std$SO2)
+
+#Pearson Correlation Coefficient of predays
+cor(PD_std$predays_std,
+    SO2_std,
+    method= "pearson"
+    )
+
+#Hypothesis test for Correlation of predays
+cor.test(x=PD_std$predays_std, y=SO2_std,
+        alternative="greater",  # H_A: true correlation is greater than zero
+         method= "pearson"
+    )
+```
+
+#### A2.5.2 Spearmans Correlation Coefficient
+
+```{r}
+#Spearman Correlation between each exp variable and response variable
+spearman_corrFunction("manu")
+spearman_corrFunction("popul")
+spearman_corrFunction("precip")
+spearman_corrFunction("temp")
+spearman_corrFunction("wind")
+
+
+```
+
+### A2.6 Explore Categorical Variable
+
+#### A2.6.1 Plot Categorical Variable
+
+```{r}
+# Create side-by-side boxplots
+ggplot(PollutionData, aes(x = region, y = SO2)) +
+  geom_boxplot(fill = "darkkhaki") +  
+  theme_minimal() +
+  labs(title = "Boxplots of SO2 emissions per region of USA", y = "Average annual SO2 concentration in air (micro-g/m^3) ") 
+
+```
+
+```{r}
+r1 <- ggplot(PollutionData, aes(x = manu, y = SO2, color = region)) +
+  geom_point(alpha = 0.6) +  
+  labs(title = "Manu and Region on SO2", 
+       x = "Manu", 
+       y = "SO2") +
+  theme_minimal() + 
+  theme(legend.position = "none")
+r2 <- ggplot(PollutionData, aes(x = popul, y = SO2, color = region)) +
+  geom_point(alpha = 0.6) +  
+  labs(title = "Popul and Region on SO2", 
+       x = "Popul", 
+       y = "SO2") +
+  theme_minimal()+ 
+  theme(legend.position = "none")
+r3 <- ggplot(PollutionData, aes(x = precip, y = SO2, color = region)) +
+  geom_point(alpha = 0.6) +  
+  labs(title = "Precip and Region on SO2", 
+       x = "Precip", 
+       y = "SO2") +
+  theme_minimal()
+r4 <- ggplot(PollutionData, aes(x = predays, y = SO2, color = region)) +
+  geom_point(alpha = 0.6) +  
+  labs(title = "Predays and Region on SO2", 
+       x = "Predays", 
+       y = "SO2") +
+  theme_minimal()+ 
+  theme(legend.position = "none")
+r5 <- ggplot(PollutionData, aes(x = temp, y = SO2, color = region)) +
+  geom_point(alpha = 0.6) +  
+  labs(title = "Temp and Region on SO2", 
+       x = "Temp", 
+       y = "SO2") +
+  theme_minimal()+ 
+  theme(legend.position = "none")
+r6 <- ggplot(PollutionData, aes(x = wind, y = SO2, color = region)) +
+  geom_point(alpha = 0.6) +  
+  labs(title = "Wind and Region on SO2", 
+       x = "Wind", 
+       y = "SO2") +
+  theme_minimal()
+
+r1 + r2 + r3
+r4 +r5 + r6
+```
+
+#### A2.6.2 Correlation of Categorical Variable
+
+#### A2.6.3 Transformation of Categorical Variables
+
+```{r}
+PD_w_dummies <- PollutionData %>%
+  mutate(
+    region_East = ifelse(region == "East", 1, 0),
+    region_North = ifelse(region == "North", 1, 0),
+    region_South = ifelse(region == "South", 1, 0),
+    region_West = ifelse(region == "West", 1, 0)
+  )
+#PD_w_dummies <- PD_w_dummies %>% select(-region)
+# View the new dataset
+tail(PD_w_dummies)
+```
+
+### A2.7 Further Exploration for MLR specifically
+
+```{r}
+#correlation matrix - large circles instead of just numbers
+PD_Num <- PollutionData %>% select(-region, -ID)
+corrplot(cor(PD_Num))
+
+
+suppressWarnings(chart.Correlation(PD_Num))
+
+PD_multi.lm <- lm(SO2 ~ manu + popul + precip + predays + temp + wind + region, data=PollutionData)
+#PD_multi.lm <- lm(SO2 ~ popul + precip + predays + temp + wind + region, data=PollutionData)
+#PD_multi.lm <- lm(SO2 ~ manu + precip + predays + temp + wind + region, data=PollutionData)
+
+
+vif(PD_multi.lm)
+
+```
+
+### A2.8 Results of Exploratory Analysis
+
+## A3. Simple Linear Regression
+
+### A3.1 Model Postulation - Pre-Transformation
+
+#### A3.1.1 Parameter Estimation
+
+```{r}
+
+# Variables fitted: manu, predays, temp 
+
+cat("##### Line of Best Fit for 'SO2' and 'manu' \n")
+manu_lm <- fitline_function('manu', PollutionData)
+manu_summary <- lmsummary_function('manu', manu_lm)
+manu_summary 
+manu_lmplot <- lmplot_function('manu','darkorange', PollutionData)
+
+
+cat("##### Line of Best Fit for 'SO2' and 'predays' \n")
+predays_lm <- fitline_function('predays', PollutionData)
+predays_summary <- lmsummary_function('predays', predays_lm)
+predays_summary 
+predays_lmplot <- lmplot_function('predays', 'deeppink1', PollutionData)
+
+cat("##### Line of Best Fit for 'SO2' and 'temp' \n")
+temp_lm <- fitline_function('temp', PollutionData)
+temp_summary <- lmsummary_function('temp', temp_lm)
+temp_summary 
+temp_lmplot <- lmplot_function('temp', 'tomato', PollutionData)
+
+```
+
+#### A3.1.2 Model Checking
+
+##### A3.1.2.1 Checking SLR assumption with Residuals
+
+```{r}
+# Get the residuals from the model
+manu_residuals <- residuals(manu_lm)
+predays_residuals <- residuals(predays_lm)
+temp_residuals <- residuals(temp_lm)
+
+# Standardise Residuals
+manu_std.residuals <- rstandard(manu_lm)
+predays_std.residuals <- rstandard(predays_lm)
+temp_std.residuals <- rstandard(temp_lm)
+
+```
+
+###### A3.1.2.1.1 Normality Check
+
+```{r}
+##QQ PLots
+
+
+# Create some random normal data to compare
+set.seed(123) 
+n <- length(manu_std.residuals) 
+random_normal <- rnorm(n)
+
+
+random_qqplot <- ggplot_qq(random_normal, "Random Normal to Compare", "blue")
+manu_qqplot <- ggplot_qq(manu_std.residuals, "Manu Standardised Residuals", "darkorange")
+predays_qqplot <- ggplot_qq(predays_std.residuals, "Predays Standardised Residuals", "deeppink1")
+temp_qqplot <- ggplot_qq(temp_std.residuals, "Temp Standardised Residuals", "tomato")
+
+
+combined_qqplot <- (random_qqplot + manu_qqplot) / (predays_qqplot + temp_qqplot)
+combined_qqplot
+
+
+## Histograms
+
+# Create ggplot histograms
+manu_hist_plot <- ggplot_hist_with_normal(manu_std.residuals, "Manu", "Manu Std. Residuals", "darkorange")
+predays_hist_plot <- ggplot_hist_with_normal(predays_std.residuals, "Predays", "Predays Std. Residuals", "deeppink1")
+temp_hist_plot <- ggplot_hist_with_normal(temp_std.residuals, "Temp", "Temp Std. Residuals", "tomato")
+
+manu_hist_plot + predays_hist_plot + temp_hist_plot
+
+```
+
+###### A3.1.2.1.2 Constant Variance & Linearity {#a3.1.2.1.2-constant-variance-linearity}
+
+```{r}
+
+ggplot(PollutionData, aes(x = manu, y = manu_std.residuals)) +
+  geom_point(color = 'darkorange') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "manu", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'manu_lm' Residuals") +
+  theme_minimal()  
+
+ggplot(PollutionData, aes(x = predays, y = predays_std.residuals)) +
+  geom_point(color = 'deeppink1') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "predays", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'predays_lm' Residuals") +
+  theme_minimal()  
+
+ggplot(PollutionData, aes(x = temp, y = temp_std.residuals)) +
+  geom_point(color = 'tomato') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "temp", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'temp_lm' Residuals") +
+  theme_minimal()  
+
+```
+
+###### A3.1.2.1.3 Residual Independence
+
+```{r}
+Residualdf <- data.frame(
+  manu_residuals = manu_residuals,
+  predays_residuals = predays_residuals,
+  temp_residuals = temp_residuals
+)
+Residualdf$order <- 1:nrow(Residualdf)
+
+
+# Create a new data frame with all residuals
+Residualdf_long <- Residualdf %>%
+  pivot_longer(cols = c(manu_residuals, predays_residuals, temp_residuals), 
+               names_to = "Variable", 
+               values_to = "Residuals")
+
+# Create the plot
+ggplot(Residualdf_long, aes(x = order, y = Residuals, color = Variable)) +
+  geom_line(color = "black") +  # Line plot for residuals
+  geom_point() +  # Points for residuals
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  # Horizontal line at y = 0
+  labs(x = "Order of Observations", y = "Residuals", 
+       title = "Residuals vs Order of Observations") +
+  theme_minimal() +
+  scale_color_manual(values = c("manu_residuals" = "darkorange", 
+                                  "predays_residuals" = "deeppink1", 
+                                  "temp_residuals" = "tomato")) +
+  facet_wrap(~ Variable, scales = "free")  # Separate plots for each residuals group
+```
+
+### A3.2 Variable Transformation
+
+#### A3.2.1 Variable Transformation Assessment
+
+```{r}
+PD_Trans <- PollutionData
+#View(PD_Trans)
+
+#Sqrt
+PD_Trans$SO2_SQRT <- sqrt(PollutionData$SO2)
+PD_Trans$manu_SQRT <- sqrt(PollutionData$manu)
+PD_Trans$predays_SQRT <- sqrt(PollutionData$predays)
+PD_Trans$temp_SQRT <- sqrt(PollutionData$temp)
+
+#Cbrt
+PD_Trans$SO2_CBRT <- (PollutionData$SO2)^(1/3)
+PD_Trans$manu_CBRT <- (PollutionData$manu)^(1/3)
+PD_Trans$predays_CBRT <- (PollutionData$predays)^(1/3)
+PD_Trans$temp_CBRT <- (PollutionData$temp)^(1/3)
+
+#log
+PD_Trans$SO2_LOG <- log(PollutionData$SO2)
+PD_Trans$manu_LOG <- log(PollutionData$manu)
+PD_Trans$predays_LOG <- log(PollutionData$predays)
+PD_Trans$temp_LOG <- log(PollutionData$temp)
+
+
+
+##manu
+
+#SQRT
+manu_notrans_plot <- residual_plot_function(PD_Trans, "manu", "SO2", "No Transformation", "darkorange")
+manu_SO2SQRT_plot <- residual_plot_function(PD_Trans, "manu", "SO2_SQRT", "SO2 SQRT", "darkorange")
+manu_2SQRT_plot <- residual_plot_function(PD_Trans, "manu_SQRT", "SO2_SQRT", "Manu and SO2 SQRT", "darkorange")
+
+#SQRT Comparison
+manu_notrans_plot + manu_SO2SQRT_plot + manu_2SQRT_plot
+
+#CBRT
+manu_SO2CBRT_plot <- residual_plot_function(PD_Trans, "manu", "SO2_CBRT", "SO2 CBRT", "darkorange")
+manu_2CBRT_plot <- residual_plot_function(PD_Trans, "manu_CBRT", "SO2_CBRT", "Manu and SO2 CBRT", "darkorange")
+
+#CBRT Comparison
+manu_notrans_plot + manu_SO2CBRT_plot + manu_2CBRT_plot
+
+#LOG
+manu_SO2LOG_plot <- residual_plot_function(PD_Trans, "manu", "SO2_LOG", "SO2 LOG", "darkorange")
+manu_2LOG_plot <- residual_plot_function(PD_Trans, "manu_LOG", "SO2_LOG", "Manu and SO2 LOG", "darkorange")
+
+#CBRT Comparison
+manu_notrans_plot + manu_SO2LOG_plot + manu_2LOG_plot
+
+
+
+## predays
+
+# SQRT
+predays_notrans_plot <- residual_plot_function(PD_Trans, "predays", "SO2", "No Transformation", "deeppink1")
+predays_SO2SQRT_plot <- residual_plot_function(PD_Trans, "predays", "SO2_SQRT", "SO2 SQRT", "deeppink1")
+predays_2SQRT_plot <- residual_plot_function(PD_Trans, "predays_SQRT", "SO2_SQRT", "Predays and SO2 SQRT", "deeppink1")
+
+# SQRT Comparison
+predays_notrans_plot + predays_SO2SQRT_plot + predays_2SQRT_plot
+
+# CBRT
+predays_SO2CBRT_plot <- residual_plot_function(PD_Trans, "predays", "SO2_CBRT", "SO2 CBRT", "deeppink1")
+predays_2CBRT_plot <- residual_plot_function(PD_Trans, "predays_CBRT", "SO2_CBRT", "Predays and SO2 CBRT", "deeppink1")
+
+# CBRT Comparison
+predays_notrans_plot + predays_SO2CBRT_plot + predays_2CBRT_plot
+
+# LOG
+predays_SO2LOG_plot <- residual_plot_function(PD_Trans, "predays", "SO2_LOG", "SO2 LOG", "deeppink1")
+predays_2LOG_plot <- residual_plot_function(PD_Trans, "predays_LOG", "SO2_LOG", "Predays and SO2 LOG", "deeppink1")
+
+# LOG Comparison
+predays_notrans_plot + predays_SO2LOG_plot + predays_2LOG_plot
+
+
+
+## temp
+
+# SQRT
+temp_notrans_plot <- residual_plot_function(PD_Trans, "temp", "SO2", "No Transformation", "tomato")
+temp_SO2SQRT_plot <- residual_plot_function(PD_Trans, "temp", "SO2_SQRT", "SO2 SQRT", "tomato")
+temp_2SQRT_plot <- residual_plot_function(PD_Trans, "temp_SQRT", "SO2_SQRT", "Temp and SO2 SQRT", "tomato")
+
+# SQRT Comparison
+temp_notrans_plot + temp_SO2SQRT_plot + temp_2SQRT_plot
+
+# CBRT
+temp_SO2CBRT_plot <- residual_plot_function(PD_Trans, "temp", "SO2_CBRT", "SO2 CBRT", "tomato")
+temp_2CBRT_plot <- residual_plot_function(PD_Trans, "temp_CBRT", "SO2_CBRT", "Temp and SO2 CBRT", "tomato")
+
+# CBRT Comparison
+temp_notrans_plot + temp_SO2CBRT_plot + temp_2CBRT_plot
+
+# LOG
+temp_SO2LOG_plot <- residual_plot_function(PD_Trans, "temp", "SO2_LOG", "SO2 LOG", "tomato")
+temp_2LOG_plot <- residual_plot_function(PD_Trans, "temp_LOG", "SO2_LOG", "Temp and SO2 LOG", "tomato")
+
+# LOG Comparison
+temp_notrans_plot + temp_SO2LOG_plot + temp_2LOG_plot
+
+```
+
+#### A3.2.2 Dataframe Transformation
+
+```{r}
+# manu data frame
+
+PD_logmanu_logSO2 <- data.frame(
+  ID = PD_Trans$ID,
+  SO2 = PD_Trans$SO2,
+  SO2_LOG = PD_Trans$SO2_LOG,
+  manu = PD_Trans$manu,
+  manu_LOG = PD_Trans$manu_LOG,
+  stringsAsFactors = FALSE
+)
+
+# predays data frame
+
+PD_predays_logSO2 <- data.frame(
+  ID = PD_Trans$ID,
+  SO2 = PD_Trans$SO2,
+  SO2_LOG = PD_Trans$SO2_LOG,
+  predays = PD_Trans$predays,
+  stringsAsFactors = FALSE
+)
+
+```
+
+### A3.3 Outlier Influence Analysis
+
+#### A3.3.1 Calculate Hat Matrix Element and Cooks Distance
+
+```{r}
+manu_hat_values <- plot_hat_values(PD_logmanu_logSO2, "manu_LOG", "SO2_LOG", false_color = "darkorange")
+predays_hat_values <- plot_hat_values(PD_predays_logSO2, "predays", "SO2_LOG", false_color = "deeppink1")
+#plot_hat_values(PollutionData, "temp", false_color = "tomato") 
+
+manu_cooks_distance <- plot_cooks_distance(PD_logmanu_logSO2, "manu_LOG", "SO2_LOG", false_color = "darkorange") 
+predays_cooks_distance <- plot_cooks_distance(PD_predays_logSO2, "predays", "SO2_LOG", false_color = "deeppink1") 
+#plot_cooks_distance(PollutionData, "temp", false_color = "tomato")
+
+manu_hat_values + manu_cooks_distance
+predays_hat_values + predays_cooks_distance
+```
+
+#### A3.3.2 Assess Leverage
+
+```{r}
+compare_lm_function(PD_logmanu_logSO2, "manu_LOG", "SO2_LOG", 1, "darkorange")
+compare_lm_function(PD_logmanu_logSO2, "manu_LOG", "SO2_LOG", 6, "darkorange")
+compare_lm_function(PD_logmanu_logSO2, "manu_LOG", "SO2_LOG", 7, "darkorange")
+compare_lm_function(PD_predays_logSO2, "predays", "SO2_LOG", 5, "deeppink1")
+```
+
+```{r}
+#Does removing all outliers in manu allow for a better model than removing none?
+initial_model <- lm(SO2_LOG ~ manu_LOG, data = PD_logmanu_logSO2)
+  
+#Remove the specified rows
+data_no_outliers <- PD_logmanu_logSO2[-c(1, 6, 7), ]
+
+#Fit the linear model after removing the row
+model_no_outlier <- lm(SO2_LOG ~ manu_LOG, data_no_outliers)
+
+
+#Plot both linear models
+plot <- ggplot(PD_logmanu_logSO2, aes(x = manu_LOG, y = SO2_LOG)) +
+  geom_point(color = "darkorange") +
+  geom_abline(intercept = coef(initial_model)[1], 
+              slope = coef(initial_model)[2], 
+              color = "blue") +
+  geom_abline(intercept = coef(model_no_outlier)[1], 
+              slope = coef(model_no_outlier)[2], 
+              color = "red") +
+   
+  theme_minimal() +
+  labs(title = "Comparison of Linear Models Before (blue) & After ALL Outlier Removal (red)",
+       x = "manu_LOG",
+       y = "SO2_LOG")
+
+print(plot)
+
+
+# Step 5: Calculate ANOVA and print results
+anova_initial <- anova(initial_model)
+anova_no_outlier <- anova(model_no_outlier)
+
+
+mse_initial <- anova_initial["Residuals", "Mean Sq"]
+mse_no_outlier <- anova_no_outlier["Residuals", "Mean Sq"]
+
+cat("\n##### Compare ANOVA Tables for manu_LOG. Outlier: ID's 1, 6, 7")
+cat("\nPre-Outlier-Removal:")
+cat("\nMSE:", mse_initial)
+
+cat("\nPost-Outlier-Removal:")
+cat("\nMSE:", mse_no_outlier)
+
+# Step 6: Determine which model fits better
+if (mse_no_outlier < mse_initial) {
+  cat("\n\nModel after Outlier Removal fits better (due to lower MSE = higher F = lower pvalue).\n")
+} else {
+  cat("\n\nModel before Outlier Removal fits better (due to lower MSE = higher F = lower pvalue).\n")
+}
+  
+
+```
+
+#### A3.3.4 Outlier Removals
+
+```{r}
+# Remove Outlier 5 from pre-days and make new dataframe
+
+PD_predays_logSO2_r5 <- PD_predays_logSO2
+PD_predays_logSO2_r5 <- PD_predays_logSO2_r5[-5, ]
+
+
+# Remove Outlier 5 from pre-days and make new dataframe
+PD_logmanu_logSO2_r167<- PD_logmanu_logSO2
+PD_logmanu_logSO2_r167<- PD_logmanu_logSO2_r167[-c(1, 6, 7), ]
+
+```
+
+### A3.4 Model Postulation - Post-Transformation & Outlier Removals {#a3.4-model-postulation---post-transformation-outlier-removals}
+
+#### A3.4.1 Parameter Estimation
+
+```{r}
+# Variables fitted: manu, predays, temp 
+
+cat("##### Line of Best Fit for 'SO2_LOG' and 'manu_LOG' (post trans)\n")
+manu2_lm <- lm(SO2_LOG ~ manu_LOG, data = PD_logmanu_logSO2_r167)
+manu2_summary <- lmsummary_function('manu_LOG', manu2_lm)
+manu2_summary 
+manu2_lmplot <- lmplot_function('manu_LOG','darkorange', PD_logmanu_logSO2_r167)
+
+
+cat("##### Line of Best Fit for 'SO2_LOG' and 'predays' (post trans) \n")
+predays2_lm <- lm(SO2_LOG ~ predays, PD_predays_logSO2_r5)
+predays2_summary <- lmsummary_function('predays', predays2_lm)
+predays2_summary 
+predays2_lmplot <- lmplot_function('predays', 'deeppink1', PD_predays_logSO2_r5)
+
+```
+
+#### A3.4.2 Model Checking
+
+##### A3.4.2.1 Checking SLR assumption with Residuals
+
+```{r}
+#manu 
+# Get the residuals from the model
+manu2_residuals <- residuals(manu2_lm)
+
+# Standardise Residuals
+manu2_std.residuals <- rstandard(manu2_lm)
+
+#Check Residuals
+manu2_qqplot <- ggplot_qq(manu2_std.residuals, "Manu Transformed Std. Residuals", "darkorange")
+manu2_hist_plot <- ggplot_hist_with_normal(manu2_std.residuals, "Manu", "Manu Std. Residuals", "darkorange")
+
+manu2_resplot <- ggplot(PD_logmanu_logSO2_r167, aes(x = manu_LOG, y = manu2_std.residuals)) +
+  geom_point(color = 'darkorange') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "manu_LOG", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'manu2_lm' Residuals") +
+  theme_minimal()  
+
+#Check Outliers
+manu2_hat_values <- plot_hat_values(PD_logmanu_logSO2_r167, "manu_LOG", "SO2_LOG", false_color = "darkorange")
+manu2_cooks_distance <- plot_cooks_distance(PD_logmanu_logSO2_r167, "manu_LOG", "SO2_LOG", false_color = "darkorange") 
+
+manu2_qqplot + 
+manu2_hist_plot 
+manu2_resplot 
+manu2_hat_values +
+manu2_cooks_distance
+```
+
+```{r}
+#predays 
+# Get the residuals from the model
+predays2_residuals <- residuals(predays2_lm)
+
+# Standardise Residuals
+predays2_std.residuals <- rstandard(predays2_lm)
+
+#Check Residuals
+predays2_qqplot <- ggplot_qq(predays2_std.residuals, "predays Transformed Std. Residuals", "deeppink1")
+predays2_hist_plot <- ggplot_hist_with_normal(predays2_std.residuals, "predays", "predays Std. Residuals", "deeppink1")
+
+predays2_resplot <- ggplot(PD_predays_logSO2_r5, aes(x = predays, y = predays2_std.residuals)) +
+  geom_point(color = 'deeppink1') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "predays", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'predays2_lm' Residuals") +
+  theme_minimal()  
+
+#Check Outliers
+predays2_hat_values <- plot_hat_values(PD_predays_logSO2_r5, "predays", "SO2_LOG", false_color = "deeppink1")
+predays2_cooks_distance <- plot_cooks_distance(PD_predays_logSO2_r5, "predays", "SO2_LOG", false_color = "deeppink1") 
+
+predays2_qqplot + 
+predays2_hist_plot 
+predays2_resplot 
+predays2_hat_values +
+predays2_cooks_distance
+```
+
+### A3.5 Model Use
+
+#### A3.5.1 ANOVA F Test
+
+```{r}
+anova(manu2_lm)
+anova(predays2_lm)
+```
+
+#### A3.5.2 Coefficient of Determination
+
+```{r}
+model_summary_manu2 <- summary(manu2_lm)
+model_summary_predays2 <- summary(predays2_lm)
+
+# Extract R-squared value 
+r_squared_manu2 <- model_summary_manu2$r.squared 
+r_squared_predays2 <- model_summary_predays2$r.squared 
+
+# Print R-squared value 
+cat("For manu: The coefficient of determination (R^2) is:", r_squared_manu2, "\n")
+cat("For predays: The coefficient of determination (R^2) is:", r_squared_predays2, "\n")
+
+```
+
+#### A3.5.3 Confidence and Prediction Intervals
+
+##### A3.5.3.1 Confidence and Prediction Intervals in Logarithmic Space
+
+```{r}
+X <- PD_logmanu_logSO2_r167$manu_LOG
+Y <- PD_logmanu_logSO2_r167$SO2_LOG
+
+# ## Make the prediction X-values dataframe.
+X_pred_manu <- data.frame(manu_LOG=seq(from=50, to=1000, by=50))
+X_pred_manu <- log(X_pred_manu)
+# # 
+# # ## Make predictions, given the X values; that is, fit the model using all rows
+# # ##   in the prediction X values.  Here, we also target confidence intervals.
+# # ## NOTE See `?predict` for more details.
+Y_pred_conf_manu <- predict(
+    manu2_lm,
+    newdata=X_pred_manu,
+    interval="confidence",
+    level=0.95
+    )
+# 
+# # ## Inspect the X and Y values.
+# X_pred_manu
+# # 
+Y_pred_conf_manu
+
+## Compute and inspect prediction intervals for "new X".
+Y_pred_pred_manu  <- predict(
+  manu2_lm,
+  newdata=X_pred_manu,
+  interval="prediction",
+  level=0.95
+)
+
+Y_pred_pred_manu
+
+## - confidence and prediction intervals for *observed* X
+Y_obs_conf_manu <- predict(manu2_lm, interval="confidence", level=0.95)
+Y_obs_pred_manu <- predict(manu2_lm, interval="prediction", level=0.95)
+## - X ordering and ordered X
+X_ordering <- order(X)
+X_ordered  <- X[X_ordering]
+
+
+logspacemanu <- plot(
+        SO2_LOG ~ manu_LOG,
+        data=PD_logmanu_logSO2_r167,
+        ylab="SO2 (log(micrograms per cubic m))",
+        xlab="manu (log(number of large manufacturing plants))",
+        main="Conf and Pred of log(SO2) vs log(manu)",
+        pch=".",            
+        cex=0, 
+        xlim = c(min(PD_logmanu_logSO2_r167$manu_LOG), max(PD_logmanu_logSO2_r167$manu_LOG)),
+        ylim = c(min(PD_logmanu_logSO2_r167$SO2_LOG) - 0.4, max(PD_logmanu_logSO2_r167$SO2_LOG) + 0.4)
+      )
+      
+      abline(manu2_lm, lwd=1.7)
+      
+      matlines(
+        x=X_ordered,
+        y=Y_obs_conf_manu[X_ordering, c(2, 3)],
+        col="blue",
+        lty=1,
+        lwd=1.7
+      )
+      
+      matlines(
+        x=X_ordered,
+        y=Y_obs_pred_manu[X_ordering, c(2, 3)],
+        col="red",
+        lty=1,
+        lwd=1.7
+      )
+      
+      points(
+        SO2_LOG ~ manu_LOG,
+        data=PD_logmanu_logSO2_r167,
+        pch=18L,
+        cex=1, 
+        col='darkorange'
+      )
+      
+      legend(
+        "topright",
+        legend = c("Linear model", "Conf. int.", "Pred. int."),
+        col = c("black", "blue", "red"),
+        lty = 1,
+        lwd = 1.8
+        )
+      
+      X <- PD_predays_logSO2_r5$predays
+Y <- PD_predays_logSO2_r5$SO2_LOG
+
+
+X_pred_predays <- data.frame(predays=seq(from=40, to=170, by=15))
+
+
+Y_pred_conf_predays <- predict(
+    predays2_lm,
+    newdata=X_pred_predays,
+    interval="confidence",
+    level=0.95
+    )
+
+Y_pred_conf_predays
+
+
+Y_pred_pred_predays  <- predict(
+  predays2_lm,
+  newdata=X_pred_predays,
+  interval="prediction",
+  level=0.95
+)
+
+Y_pred_pred_predays
+
+
+Y_obs_conf_predays <- predict(predays2_lm, interval="confidence", level=0.95)
+Y_obs_pred_predays <- predict(predays2_lm, interval="prediction", level=0.95)
+
+X_ordering <- order(X)
+X_ordered  <- X[X_ordering]
+
+## Make the base scatterplot.
+logspacepredays <- plot(
+        SO2_LOG ~ predays,
+        data=PD_predays_logSO2_r5,
+        ylab="SO2 (log(micrograms per cubic m))",
+        xlab="average annual number of precip days",
+        main="Conf and Pred of log(SO2) vs log(precip)",
+        pch=".",            
+        cex=0, 
+        ylim = c(min(PD_predays_logSO2_r5$SO2_LOG) - 0.5, max(PD_predays_logSO2_r5$SO2_LOG) + 0.5)
+      )
+
+      abline(predays2_lm, lwd=1.7)
+      
+
+      matlines(
+        x=X_ordered,
+        y=Y_obs_conf_predays[X_ordering, c(2, 3)],
+        col="blue",
+        lty=1,
+        lwd=1.7
+      )
+
+      matlines(
+        x=X_ordered,
+        y=Y_obs_pred_predays[X_ordering, c(2, 3)],
+        col="red",
+        lty=1,
+        lwd=1.7
+      )
+      
+      points(
+        SO2_LOG ~ predays,
+        data=PD_predays_logSO2_r5,
+        pch=18L,
+        cex=1, 
+        col='deeppink1'
+      )
+      
+      legend(
+        "topright",
+        legend = c("Linear model", "Conf. int.", "Pred. int."),
+        col = c("black", "blue", "red"),
+        lty = 1,
+        lwd = 1.8
+        )
+
+
+```
+
+##### A3.5.3.2 Confidence and Prediction Intervals in Exponentiated Space
+
+```{r}
+# Get confidence and prediction intervals for the linear model in log space
+manu2_conf <- predict(manu2_lm, interval = "conf")
+manu2_pred <- predict(manu2_lm, interval = "pred")
+
+# Rename columns for better identification
+colnames(manu2_conf)[c(2, 3)] <- paste0("conf_", colnames(manu2_conf)[c(2, 3)])
+colnames(manu2_pred)[c(2, 3)] <- paste0("pred_", colnames(manu2_pred)[c(2, 3)])
+
+# Combine prediction and confidence intervals
+manu2_pred_combined <- cbind(manu2_pred, manu2_conf[, c(2, 3)])
+
+# Exponentiate predictions and intervals to back-transform from log space to original space
+manu2_pred_exp <- exp(manu2_pred_combined)
+
+# Exponentiate the log(manu) values to get the original 'manu' scale
+manu_original <- exp(PD_logmanu_logSO2_r167$manu_LOG)
+
+# Order the X values for proper plotting
+X_ordering <- order(manu_original)
+X_ordered <- manu_original[X_ordering]
+
+# Plot the data in original (non-logarithmic) space
+plot(
+  exp(SO2_LOG) ~ manu_original,
+  data = PD_logmanu_logSO2_r167,
+  ylab = "SO2 (micrograms per cubic meter)",
+  xlab = "Number of large manufacturing plants (manu)",
+  main = "Conf and Pred of SO2 vs manu (exponentiated)",
+  pch = ".",            
+  cex = 0,
+  xlim = c(min(manu_original), max(manu_original)),
+  ylim = c(min(exp(PD_logmanu_logSO2_r167$SO2_LOG)) - 0.4, max(exp(PD_logmanu_logSO2_r167$SO2_LOG)) + 0.4)
+)
+
+# Plot the exponentiated linear model (fitted values in original scale)
+lines(X_ordered, manu2_pred_exp[X_ordering, 1], col = "black", lwd = 1.7)
+
+# Plot the exponentiated confidence intervals
+matlines(
+  x = X_ordered,
+  y = manu2_pred_exp[X_ordering, c(4, 5)],  # Columns for confidence interval bounds
+  col = "blue",
+  lty = 1,
+  lwd = 1.7
+)
+
+# Plot the exponentiated prediction intervals
+matlines(
+  x = X_ordered,
+  y = manu2_pred_exp[X_ordering, c(2, 3)],  # Columns for prediction interval bounds
+  col = "red",
+  lty = 1,
+  lwd = 1.7
+)
+
+# Re-add the original points
+points(exp(SO2_LOG) ~ manu_original, data = PD_logmanu_logSO2_r167, pch = 18L, cex = 1, col = 'darkorange')
+
+# Add a legend to distinguish between lines
+legend(
+  "topright",
+  legend = c("Linear model", "Conf. int.", "Pred. int."),
+  col = c("black", "blue", "red"),
+  lty = 1,
+  lwd = 1.8
+)
+
+# Get confidence and prediction intervals for the linear model in log space
+predays2_conf <- predict(predays2_lm, interval = "conf")
+predays2_pred <- predict(predays2_lm, interval = "pred")
+
+# Rename columns for better identification
+colnames(predays2_conf)[c(2, 3)] <- paste0("conf_", colnames(predays2_conf)[c(2, 3)])
+colnames(predays2_pred)[c(2, 3)] <- paste0("pred_", colnames(predays2_pred)[c(2, 3)])
+
+# Combine prediction and confidence intervals
+predays2_pred_combined <- cbind(predays2_pred, predays2_conf[, c(2, 3)])
+
+# Exponentiate predictions and intervals to back-transform SO2_LOG from log space to original space
+predays2_pred_exp <- exp(predays2_pred_combined)
+
+# Order the X values for proper plotting
+X_ordering <- order(PD_predays_logSO2_r5$predays)
+X_ordered <- PD_predays_logSO2_r5$predays[X_ordering]
+
+# Plot the data in original (non-logarithmic) space
+plot(
+  exp(SO2_LOG) ~ predays,
+  data = PD_predays_logSO2_r5,
+  ylab = "SO2 (micrograms per cubic meter)",
+  xlab = "Average annual number of precip days (predays)",
+  main = "Conf and Pred of SO2 vs predays (exponentiated)",
+  pch = ".",            
+  cex = 0,
+  xlim = c(min(PD_predays_logSO2_r5$predays), max(PD_predays_logSO2_r5$predays)),
+  ylim = c(min(exp(PD_predays_logSO2_r5$SO2_LOG)) - 0.5, max(exp(PD_predays_logSO2_r5$SO2_LOG)) + 0.5)
+)
+
+# Plot the exponentiated linear model (fitted values in original scale)
+lines(X_ordered, predays2_pred_exp[X_ordering, 1], col = "black", lwd = 1.7)
+
+# Plot the exponentiated confidence intervals
+matlines(
+  x = X_ordered,
+  y = predays2_pred_exp[X_ordering, c(4, 5)],  # Columns for confidence interval bounds
+  col = "blue",
+  lty = 1,
+  lwd = 1.7
+)
+
+# Plot the exponentiated prediction intervals
+matlines(
+  x = X_ordered,
+  y = predays2_pred_exp[X_ordering, c(2, 3)],  # Columns for prediction interval bounds
+  col = "red",
+  lty = 1,
+  lwd = 1.7
+)
+
+# Re-add the original points in darkorange
+points(exp(SO2_LOG) ~ predays, data = PD_predays_logSO2_r5, pch = 18L, cex = 1, col = "deeppink1")
+
+# Add a legend to distinguish between lines
+legend(
+  "topright",
+  legend = c("Linear model", "Conf. int.", "Pred. int."),
+  col = c("black", "blue", "red"),
+  lty = 1,
+  lwd = 1.8
+)
+```
+
+## A4. Multiple Linear Regression
+
+### A4.1 Fit Model using all Explanatory Variables
+
+```{r}
+# Use Dummy variable data and omit 1 dummy when fitting
+PDD_multi.lm <- lm(SO2 ~ manu + popul + precip + predays + temp + wind + region_East + region_North + region_South, data=PD_w_dummies)
+summary(PDD_multi.lm)
+
+PDD_multi_rmanu.lm <- lm(SO2 ~ popul + precip + predays + temp + wind + region_East + region_North + region_South, data=PD_w_dummies)
+summary(PDD_multi_rmanu.lm)
+
+#transform So2 to be included in dummies 
+PD_w_dummies$SO2_LOG <- log(PD_w_dummies$SO2)
+
+PDD_multi_SO2LOG.lm <- lm(SO2_LOG ~ manu + popul + precip + predays + temp + wind + region_East + region_North + region_South, data=PD_w_dummies)
+summary(PDD_multi_SO2LOG.lm)
+
+```
+
+### A4.2 Variable Selection
+
+#### A4.2.1 Stepwise
+
+```{r}
+step(PDD_multi_SO2LOG.lm, direction="backward", trace = 1)
+
+
+```
+
+#### A4.2.2 All Subsets
+
+```{r}
+#use dummy variables 
+AllSubsets <- regsubsets(SO2_LOG ~ manu + popul + precip + predays + temp + wind + region_East + region_North + region_South, nvmax = 9, nbest = 1, data = PD_w_dummies)
+AllSubsets.summary <-summary(AllSubsets)
+AllSubsets.summary
+
+```
+
+```{r}
+# Modify some graphical parameters
+par(mfrow = c(1, 3))
+par(cex.axis = 1.5)
+par(cex.lab = 1.5)
+
+plot(1:9, AllSubsets.summary$adjr2, xlab = "subset size", ylab = "adjusted R-squared", type = "b")
+plot(1:9, AllSubsets.summary$cp, xlab = "subset size", ylab = "Mallows' Cp", type = "b")
+abline(0,1,col=2)
+plot(1:9, AllSubsets.summary$bic, xlab = "subset size", ylab = "BIC", type = "b")
+
+
+
+```
+
+```{r}
+#Comparing Brute Force 5 and Brute Force 6
+PDD_multi_BF5.lm <- lm(SO2_LOG ~ manu + temp + predays + wind + region_East, data = PD_w_dummies)
+summary(PDD_multi_BF5.lm)
+
+PDD_multi_BF6.lm <- lm(SO2_LOG ~ manu + popul + temp + predays + wind + region_East, data = PD_w_dummies)
+summary(PDD_multi_BF6.lm)
+```
+
+### A4.3 Making Models
+
+#### A4.3.1 MLR1 Model Postulation - Pre-Transformation
+
+```{r}
+summary(PDD_multi_BF5.lm)
+```
+
+#### A4.3.2 MLR1 Model Checking
+
+```{r}
+#Make model data set
+PD_Multi5 <- data.frame(SO2_LOG = PD_w_dummies$SO2_LOG, 
+                         manu = PD_w_dummies$manu, 
+                         temp = PD_w_dummies$temp, 
+                         predays = PD_w_dummies$predays, 
+                         wind = PD_w_dummies$wind, 
+                         region_East = PD_w_dummies$region_East)
+
+# View the new DataFrame
+head(PD_Multi5)
+
+#correlation matrix - large circles instead of just numbers
+corrplot(cor(PD_Multi5))
+
+
+suppressWarnings(chart.Correlation(PD_Multi5))
+
+PD_Multi5.lm <- lm(SO2_LOG ~ manu + predays + temp + wind + region_East, data=PD_Multi5)
+
+vif(PD_Multi5.lm)
+
+```
+
+#### A4.3.3 MLR1 Checking linear regression assumptions with residuals
+
+```{r}
+PD_Multi5_StdRes <- rstandard(PD_Multi5.lm)
+
+PD_Multi5_StdRes_qqplot <- ggplot_qq(PD_Multi5_StdRes, "PD_Multi5_StdRes", "darkgreen")
+PD_Multi5_StdRes_hist_plot <- ggplot_hist_with_normal(PD_Multi5_StdRes, "PD_Multi5_StdRes", "Std. Residuals", "darkgreen")
+
+PD_Multi5_resplot <- ggplot(PD_Multi5, aes(x = PD_Multi5.lm$fitted.values, y = PD_Multi5_StdRes)) +
+  geom_point(color = 'darkgreen') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "Fitted Values", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'PD_Multi5_StdRes' Residuals") +
+  theme_minimal()  
+
+
+# Calculate the hat values
+PD_Multi5_HatValues <- hatvalues(PD_Multi5.lm)
+  #Calculate p
+p <- length(coef(PD_Multi5.lm)) - 1
+#calculate n
+n <- nrow(PD_Multi5)
+# Combine hat values with the original data
+PD_Multi5 <- PD_Multi5 %>% 
+  mutate(HatValues = PD_Multi5_HatValues,
+         HighLeverage = HatValues > (2 * (p + 1) / n)) %>%
+  mutate(ID = row_number())
+
+# Create the plot for Hat Values
+PD_Multi5_HatPlot <- ggplot(PD_Multi5, aes(x = ID, y = HatValues)) +
+  geom_point(aes(color = HighLeverage), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkgreen", "TRUE" = "green"), name = "High Leverage") +
+  geom_hline(yintercept = (2 * (p + 1) / n), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Hat Values", 
+       title = "Hat Matrix") +
+  theme_minimal() +
+  geom_text(data = filter(PD_Multi5, HighLeverage), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+
+PD_Multi5_Cooks <- cooks.distance(PD_Multi5.lm)  
+  #Calculate p
+p <- length(coef(PD_Multi5.lm)) - 1
+#calculate n
+n <- nrow(PD_Multi5)
+# Calculate Cook's distance and add to the dataset
+PD_Multi5$CooksDistance <- PD_Multi5_Cooks
+PD_Multi5 <- PD_Multi5 %>% 
+  mutate(HighInfluence = CooksDistance > (2 * (p + 1) / (n - (p - 2)))) %>%
+  mutate(ID = row_number())
+
+# Plot Cook's Distance
+PD_Multi5_CooksPlot <- ggplot(PD_Multi5, aes(x = ID, y = CooksDistance)) +
+  geom_point(aes(color = HighInfluence), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkgreen", "TRUE" = "green"), name = "High Influence") +
+  geom_hline(yintercept = (2 * (p + 1) / (n - (p - 2))), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Cook's Distance", 
+       title = "Cook's Distance") +
+  theme_minimal() +
+  geom_text(data = filter(PD_Multi5, HighInfluence), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+PD_Multi5_StdRes_qqplot + 
+PD_Multi5_StdRes_hist_plot
+PD_Multi5_resplot
+PD_Multi5_CooksPlot + 
+PD_Multi5_HatPlot 
+
+```
+
+#### A4.3.4 MLR1 Transformation
+
+```{r}
+#Transform manu
+manuMLR_CBRT <- (PD_w_dummies$manu)^(1/3)
+
+#Make model data set
+PD_Multi5_manuCBRT <- data.frame(SO2_LOG = PD_w_dummies$SO2_LOG, 
+                         manuMLR_CBRT = manuMLR_CBRT,
+                         temp = PD_w_dummies$temp, 
+                         predays = PD_w_dummies$predays, 
+                         wind = PD_w_dummies$wind, 
+                         region_East = PD_w_dummies$region_East)
+
+# View the new DataFrame
+head(PD_Multi5_manuCBRT)
+
+#correlation matrix - large circles instead of just numbers
+#corrplot(cor(PD_Multi5_manuLOG))
+
+
+suppressWarnings(chart.Correlation(PD_Multi5_manuCBRT))
+
+PD_Multi5_manuCBRT.lm <- lm(SO2_LOG ~ manuMLR_CBRT + predays + temp + wind + region_East, data=PD_Multi5_manuCBRT)
+summary(PD_Multi5_manuCBRT.lm)
+
+vif(PD_Multi5_manuCBRT.lm)
+```
+
+#### A4.3.5 MLR1 Checking assumptions post_transformation
+
+```{r}
+PD_Multi5_manuCBRT_StdRes <- rstandard(PD_Multi5_manuCBRT.lm)
+
+PD_Multi5_manuCBRT_StdRes_qqplot <- ggplot_qq(PD_Multi5_manuCBRT_StdRes, "PD_Multi5_manuCBRT_StdRes", "darkgreen")
+PD_Multi5_manuCBRT_StdRes_hist_plot <- ggplot_hist_with_normal(PD_Multi5_manuCBRT_StdRes, "PD_Multi5_manuCBRT_StdRes", "Std. Residuals", "darkgreen")
+
+PD_Multi5_manuCBRT_resplot <- ggplot(PD_Multi5_manuCBRT, aes(x = PD_Multi5_manuCBRT.lm$fitted.values, y = PD_Multi5_manuCBRT_StdRes)) +
+  geom_point(color = 'darkgreen') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "Fitted Values", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'PD_Multi5_manuCBRT_StdRes' Residuals") +
+  theme_minimal()  
+
+
+# Calculate the hat values
+PD_Multi5_manuCBRT_HatValues <- hatvalues(PD_Multi5_manuCBRT.lm)
+  #Calculate p
+p <- length(coef(PD_Multi5_manuCBRT.lm)) - 1
+#calculate n
+n <- nobs(PD_Multi5_manuCBRT.lm)
+# Combine hat values with the original data
+PD_Multi5_manuCBRT <- PD_Multi5_manuCBRT %>% 
+  mutate(HatValues = PD_Multi5_manuCBRT_HatValues,
+         HighLeverage = HatValues > (2 * (p + 1) / n)) %>%
+  mutate(ID = row_number())
+
+# Create the plot for Hat Values
+PD_Multi5_manuCBRT_HatPlot <- ggplot(PD_Multi5_manuCBRT, aes(x = ID, y = HatValues)) +
+  geom_point(aes(color = HighLeverage), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkgreen", "TRUE" = "green"), name = "High Leverage") +
+  geom_hline(yintercept = (2 * (p + 1) / n), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Hat Values", 
+       title = "Hat Matrix") +
+  theme_minimal() +
+  geom_text(data = filter(PD_Multi5_manuCBRT, HighLeverage), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+
+PD_Multi5_manuCBRT_Cooks <- cooks.distance(PD_Multi5_manuCBRT.lm)  
+  #Calculate p
+p <- length(coef(PD_Multi5_manuCBRT.lm)) - 1
+#calculate n
+n <- nobs(PD_Multi5_manuCBRT.lm)
+# Calculate Cook's distance and add to the dataset
+PD_Multi5_manuCBRT$CooksDistance <- PD_Multi5_manuCBRT_Cooks
+PD_Multi5_manuCBRT <- PD_Multi5_manuCBRT %>% 
+  mutate(HighInfluence = CooksDistance > (2 * (p + 1) / (n - (p - 2)))) %>%
+  mutate(ID = row_number())
+
+# Plot Cook's Distance
+PD_Multi5_manuCBRT_CooksPlot <- ggplot(PD_Multi5_manuCBRT, aes(x = ID, y = CooksDistance)) +
+  geom_point(aes(color = HighInfluence), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkgreen", "TRUE" = "green"), name = "High Influence") +
+  geom_hline(yintercept = (2 * (p + 1) / (n - (p - 2))), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Cook's Distance", 
+       title = "Cook's Distance") +
+  theme_minimal() +
+  geom_text(data = filter(PD_Multi5_manuCBRT, HighInfluence), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+PD_Multi5_manuCBRT_StdRes_qqplot + 
+PD_Multi5_manuCBRT_StdRes_hist_plot
+PD_Multi5_manuCBRT_resplot
+PD_Multi5_manuCBRT_CooksPlot + 
+PD_Multi5_manuCBRT_HatPlot 
+
+```
+
+#### A4.3.6 MLR1 Final Model 1 & ANOVA {#a4.3.6-mlr1-final-model-1-anova}
+
+```{r}
+summary(PD_Multi5_manuCBRT.lm)
+anova(PD_Multi5_manuCBRT.lm)
+```
+
+#### A4.4.1 MLR2 Model Postulation (alternative variable selection)
+
+```{r}
+PDD_multi_T2 <- PD_w_dummies #make T2 dataframe
+
+PD_w_dummies$SO2_LOG <- log(PD_w_dummies$SO2) # log SO2
+PDD_multi_T2$manu_CBRT <- (PDD_multi_T2$manu)^(1/3) #cbrt manu
+PDD_multi_T2 <- PDD_multi_T2 %>% select( -ID, -region) #remove old
+
+
+PDD_multi_T2.lm <- lm(SO2_LOG ~ manu_CBRT + predays + temp + poly(wind, 3) + region_East, data=PDD_multi_T2)
+summary(PDD_multi_T2.lm)
+
+vif(PDD_multi_T2.lm)
+
+
+
+```
+
+```{r}
+
+step(PDD_multi_T2.lm, direction="backward", trace = 1)
+
+
+```
+
+#### A4.4.2 Compare MLR2 Model to MLR1 Model - Partial F-test
+
+```{r}
+anova(PD_Multi5_manuCBRT.lm, PDD_multi_T2.lm)
+```
+
+#### A4.4.3 MLR2 Checking linear regression assumptions
+
+```{r}
+
+PDD_multi_T2_StdRes <- rstandard(PDD_multi_T2.lm)
+
+PDD_multi_T2_StdRes_qqplot <- ggplot_qq(PDD_multi_T2_StdRes, "PDD_multi_T2_StdRes", "darkblue")
+PDD_multi_T2_StdRes_hist_plot <- ggplot_hist_with_normal(PDD_multi_T2_StdRes, "PDD_multi_T2_StdRes", " Std. Residuals", "darkblue")
+
+PDD_multi_T2_resplot <- ggplot(PDD_multi_T2, aes(x = PDD_multi_T2.lm$fitted.values, y = PDD_multi_T2_StdRes)) +
+  geom_point(color = 'darkblue') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "Fitted Values", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'PDD_multi_T2_StdRes' Residuals") +
+  theme_minimal()  
+
+
+# Calculate the hat values
+PDD_multi_T2_HatValues <- hatvalues(PDD_multi_T2.lm)
+  #Calculate p
+p <- length(coef(PDD_multi_T2.lm)) - 1
+#calculate n
+n <- nrow(PDD_multi_T2)
+# Combine hat values with the original data
+PDD_multi_T2 <- PDD_multi_T2 %>% 
+  mutate(HatValues = PDD_multi_T2_HatValues,
+         HighLeverage = HatValues > (2 * (p + 1) / n)) %>%
+  mutate(ID = row_number())
+
+# Create the plot for Hat Values
+PDD_multi_T2_HatPlot <- ggplot(PDD_multi_T2, aes(x = ID, y = HatValues)) +
+  geom_point(aes(color = HighLeverage), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkblue", "TRUE" = "green"), name = "High Leverage") +
+  geom_hline(yintercept = (2 * (p + 1) / n), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Hat Values", 
+       title = "Hat Matrix") +
+  theme_minimal() +
+  geom_text(data = filter(PDD_multi_T2, HighLeverage), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+
+PDD_multi_T2_Cooks <- cooks.distance(PDD_multi_T2.lm)  
+# Calculate Cook's distance and add to the dataset
+PDD_multi_T2$CooksDistance <- PDD_multi_T2_Cooks
+PDD_multi_T2 <- PDD_multi_T2 %>% 
+  mutate(HighInfluence = CooksDistance > (2 * (p + 1) / (n - (p - 2)))) %>%
+  mutate(ID = row_number())
+
+# Plot Cook's Distance
+PDD_multi_T2_CooksPlot <- ggplot(PDD_multi_T2, aes(x = ID, y = CooksDistance)) +
+  geom_point(aes(color = HighInfluence), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkblue", "TRUE" = "green"), name = "High Influence") +
+  geom_hline(yintercept = (2 * (p + 1) / (n - (p - 2))), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Cook's Distance", 
+       title = "Cook's Distance") +
+  theme_minimal() +
+  geom_text(data = filter(PDD_multi_T2, HighInfluence), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+PDD_multi_T2_StdRes_qqplot + 
+PDD_multi_T2_StdRes_hist_plot 
+PDD_multi_T2_resplot 
+PDD_multi_T2_CooksPlot + 
+PDD_multi_T2_HatPlot 
+
+```
+
+#### A4.4.4 Outlier Removal and reassess linear assumptions with residuals
+
+```{r}
+PDD_multi_T2r40 <- PDD_multi_T2[-40, ]
+columns_to_remove <- c("ID", "HatValues", "HighLeverage", "CooksDistance", "HighInfluence")
+PDD_multi_T2r40 <- PDD_multi_T2r40[, !names(PDD_multi_T2r40) %in% columns_to_remove]
+# View(PDD_multi_T2r40)
+```
+
+```{r}
+
+
+PDD_multi_T2r40.lm <- lm(SO2_LOG ~ manu_CBRT + predays + temp + poly(wind, 3) + region_East, data=PDD_multi_T2r40)
+
+
+
+PDD_multi_T2r40_StdRes <- rstandard(PDD_multi_T2r40.lm)
+
+PDD_multi_T2r40_StdRes_qqplot <- ggplot_qq(PDD_multi_T2r40_StdRes, "PDD_multi_T2r40_StdRes", "darkblue")
+PDD_multi_T2r40_StdRes_hist_plot <- ggplot_hist_with_normal(PDD_multi_T2r40_StdRes, "PDD_multi_T2r40_StdRes", " Std. Residuals", "darkblue")
+
+PDD_multi_T2r40_resplot <- ggplot(PDD_multi_T2r40, aes(x = PDD_multi_T2r40.lm$fitted.values, y = PDD_multi_T2r40_StdRes)) +
+  geom_point(color = 'darkblue') +  
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +  
+  labs(x = "Fitted Values", y = "Standardised Residuals", 
+       title = "Check Constant Variance & Linearity of 'PDD_multi_T2r40_StdRes' Residuals") +
+  theme_minimal()  
+
+
+# Calculate the hat values
+PDD_multi_T2r40_HatValues <- hatvalues(PDD_multi_T2r40.lm)
+  #Calculate p
+p <- length(coef(PDD_multi_T2r40.lm)) - 1
+#calculate n
+n <- nrow(PDD_multi_T2r40)
+# Combine hat values with the original data
+PDD_multi_T2r40 <- PDD_multi_T2r40 %>% 
+  mutate(HatValues = PDD_multi_T2r40_HatValues,
+         HighLeverage = HatValues > (2 * (p + 1) / n)) %>%
+  mutate(ID = row_number())
+
+# Create the plot for Hat Values
+PDD_multi_T2r40_HatPlot <- ggplot(PDD_multi_T2r40, aes(x = ID, y = HatValues)) +
+  geom_point(aes(color = HighLeverage), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkblue", "TRUE" = "green"), name = "High Leverage") +
+  geom_hline(yintercept = (2 * (p + 1) / n), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Hat Values", 
+       title = "Hat Matrix") +
+  theme_minimal() +
+  geom_text(data = filter(PDD_multi_T2r40, HighLeverage), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+PDD_multi_T2r40_Cooks <- cooks.distance(PDD_multi_T2r40.lm)  
+# Calculate Cook's distance and add to the dataset
+PDD_multi_T2r40$CooksDistance <- PDD_multi_T2r40_Cooks
+PDD_multi_T2r40 <- PDD_multi_T2r40 %>% 
+  mutate(HighInfluence = CooksDistance > (2 * (p + 1) / (n - (p - 2)))) %>%
+  mutate(ID = row_number())
+
+# Plot Cook's Distance
+PDD_multi_T2r40_CooksPlot <- ggplot(PDD_multi_T2r40, aes(x = ID, y = CooksDistance)) +
+  geom_point(aes(color = HighInfluence), 
+             alpha = 0.9, 
+             size = 3) +
+  scale_color_manual(values = c("FALSE" = "darkblue", "TRUE" = "green"), name = "High Influence") +
+  geom_hline(yintercept = (2 * (p + 1) / (n - (p - 2))), linetype = "dashed", color = "red") + 
+  labs(x = "Observation", y = "Cook's Distance", 
+       title = "Cook's Distance") +
+  theme_minimal() +
+  geom_text(data = filter(PDD_multi_T2r40, HighInfluence), 
+            aes(label = ID), 
+            vjust = -0.5, 
+            color = "black", 
+            size = 3)
+
+
+PDD_multi_T2r40_StdRes_qqplot + 
+PDD_multi_T2r40_StdRes_hist_plot 
+PDD_multi_T2r40_resplot 
+PDD_multi_T2r40_CooksPlot + 
+PDD_multi_T2r40_HatPlot 
+
+```
+
+#### A4.4.5 MLR2 Final Model 2 & ANOVA {#a4.4.5-mlr2-final-model-2-anova}
+
+```{r}
+summary(PDD_multi_T2r40.lm)
+anova(PDD_multi_T2r40.lm)
+```
+
+## A5 Extension
+
+```{r}
+ExtData <- PD_w_dummies
+
+#SO2 as x var, East as y var
+model <- glm(region_East ~ SO2, data = ExtData, family = binomial)
+summary(model)
+```
+
+```{r}
+confint_model <- confint(model)
+```
+
+```{r}
+# Predicted probabilities
+predicted_probs <- predict(model, type = "response")
+
+# Add predicted probabilities to ExtData
+ExtData$predicted_prob <- predicted_probs
+
+# Plot predicted probabilities vs. SO2
+ggplot(ExtData, aes(x = SO2, y = predicted_prob)) +
+  geom_point(alpha = 0.5) +
+  geom_line(aes(y = predicted_prob), color = "maroon") +
+  labs(x = "SO2", y = "Predicted Probability of Region Being East") +
+  theme_minimal() +
+  ggtitle("Predicted Probabilities from Logistic Regression Model")
+```
+
+```{r}
+# Calculate Cook's distance
+cooks_distance <- cooks.distance(model)
+
+# Create a plot of Cook's distance
+ggplot(data = data.frame(Index = 1:length(cooks_distance), CookD = cooks_distance), 
+       aes(x = Index, y = CookD)) +
+  geom_point() +
+  geom_hline(yintercept = 4 / length(cooks_distance), linetype = "dashed", color = "maroon") +
+  labs(x = "Observation Index", y = "Cook's Distance") +
+  theme_minimal() +
+  ggtitle("Cook's Distance for Influential Observations")
+```
+
+```{r}
+#new dataframe
+SO2_values <- seq(min(ExtData$SO2), max(ExtData$SO2), length.out = 100)
+predicted_values <- data.frame(SO2 = SO2_values)
+
+# Calculate predicted probabilities for new SO2 values
+predicted_probs_new <- predict(model, newdata = predicted_values, type = "response")
+
+# Calculate standard errors for predicted probabilities
+se_fit <- sqrt(predicted_probs_new * (1 - predicted_probs_new) / nrow(ExtData))
+
+# Calculate lower and upper confidence intervals
+lower_ci <- predicted_probs_new - 1.96 * se_fit
+upper_ci <- predicted_probs_new + 1.96 * se_fit
+
+# Create a new data frame for plotting with confidence intervals
+plot_data <- data.frame(SO2 = SO2_values,
+                        predicted_prob = predicted_probs_new,
+                        lower_ci = lower_ci,
+                        upper_ci = upper_ci)
+
+# Plot predicted probabilities with confidence intervals as a ribbon
+ggplot(plot_data, aes(x = SO2)) +
+  geom_line(aes(y = predicted_prob), color = "maroon") +
+  geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci), alpha = 0.2, fill = "lightblue") +
+  labs(x = "SO2", y = "Predicted Probability of Region Being East") +
+  theme_minimal() +
+  ggtitle("Predicted Probabilities with Confidence Intervals with Logistic GLM")
+```
